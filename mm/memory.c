@@ -69,6 +69,10 @@
 #include <asm/tlbflush.h>
 #include <asm/pgtable.h>
 
+#ifdef CONFIG_MTK_EXTMEM
+#include <linux/exm_driver.h>
+#endif
+
 #include "internal.h"
 
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
@@ -1741,11 +1745,18 @@ int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
 	 * un-COW'ed pages by matching them up with "vma->vm_pgoff".
 	 * See vm_normal_page() for details.
 	 */
+#ifdef CONFIG_MTK_EXTMEM
+	if (addr == vma->vm_start && end == vma->vm_end)
+		vma->vm_pgoff = pfn;
+	else if (is_cow_mapping(vma->vm_flags))
+		return -EINVAL;
+#else
 	if (is_cow_mapping(vma->vm_flags)) {
 		if (addr != vma->vm_start || end != vma->vm_end)
 			return -EINVAL;
 		vma->vm_pgoff = pfn;
 	}
+#endif
 
 	err = track_pfn_remap(vma, &prot, pfn, addr, PAGE_ALIGN(size));
 	if (err)
@@ -2536,7 +2547,8 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	}
 
 	swap_free(entry);
-	if (vm_swap_full() || (vma->vm_flags & VM_LOCKED) || PageMlocked(page))
+    if ((PageSwapCache(page) && vm_swap_full(page_swap_info(page))) ||
+        (vma->vm_flags & VM_LOCKED) || PageMlocked(page))
 		try_to_free_swap(page);
 	unlock_page(page);
 	if (page != swapcache) {
@@ -3576,6 +3588,24 @@ static int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
 		ret = get_user_pages(tsk, mm, addr, 1,
 				write, 1, &page, &vma);
 		if (ret <= 0) {
+#ifdef CONFIG_MTK_EXTMEM
+			if (!write) {
+				vma = find_vma(mm, addr);
+				if (!vma || vma->vm_start > addr)
+					break;
+				if (vma->vm_end < addr + len)
+					len = vma->vm_end - addr;
+				if (extmem_in_mspace(vma)) {
+					unsigned long pa = vma->vm_pgoff << PAGE_SHIFT;
+					void *extmem_va =
+						(void *)(get_virt_from_mspace(pa) + (addr - vma->vm_start));
+
+					memcpy(buf, extmem_va, len);
+					buf += len;
+					break;
+				}
+			}
+#endif
 #ifndef CONFIG_HAVE_IOREMAP_PROT
 			break;
 #else
